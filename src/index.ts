@@ -1,6 +1,5 @@
 import fs from "fs";
 import path from "path";
-import { pipeline } from "stream/promises";
 import { gql } from "@apollo/client";
 import createApolloClient from "./apolloClient";
 import specialExcelParsing from "./specialExcelParsing";
@@ -21,14 +20,17 @@ async function importScript() {
     process.env.STRAPI_PASSWORD,
   );
 
+  console.log("Client created successfully.");
+
   const csvOptions = {
-    //columns: true,
+    // columns: true,
     delimiter: process.env.CSV_DELIMITER,
     quote: process.env.CSV_QUOTE || "",
     escape: process.env.CSV_ESCAPE,
     skipLines: 0,
     headers: true,
     strict: true,
+    ignoreEmpty: true,
   };
 
   // ".." because of the dist folder
@@ -48,50 +50,38 @@ async function importScript() {
   const csvFilePath = path.join(csvDir, csvFiles[0]);
 
   try {
-    const headers = await new Promise<string[]>((resolve, reject) => {
-      const headerStream = fs
-        .createReadStream(csvFilePath)
+    const headers: string[] = [];
+    const rows: string[][] = [];
+    let isFirstRow = true;
+
+    await new Promise<void>((resolve, reject) => {
+      fs.createReadStream(csvFilePath)
         .pipe(specialExcelParsing)
-        .pipe(parse({ ...csvOptions, to_line: 1 }));
-
-      headerStream.on("data", (header: string[]) => {
-        headerStream.pause();
-        resolve(header);
-      });
-      headerStream.on("error", (err: Error) => {
-        headerStream.pause();
-        reject(err);
-      });
+        .pipe(parse(csvOptions))
+        .on("data", (row: string[]) => {
+          if (isFirstRow) {
+            headers.push(...row);
+            isFirstRow = false;
+          } else {
+            rows.push(row);
+          }
+        })
+        .on("error", (err: Error) => {
+          reject(err);
+        })
+        .on("end", () => {
+          resolve();
+        });
     });
-
-    console.log("headers", headers);
-
-    const sampleRow = await new Promise<string[]>((resolve, reject) => {
-      const rowStream = fs
-        .createReadStream(csvFilePath)
-        .pipe(specialExcelParsing)
-        .pipe(parse({ ...csvOptions, to_line: 2, from_line: 2 }));
-
-      rowStream.on("data", (row: string[]) => {
-        rowStream.pause();
-        resolve(row);
-      });
-
-      rowStream.on("error", (err: Error) => {
-        rowStream.pause();
-        reject(err);
-      });
-    });
-
-    console.log("sampleRow", sampleRow);
 
     const mutationFields = headers
-      .map(decideHeader.bind(null, sampleRow))
+      .map(header => decideHeader(rows[0], header))
       .join(" ");
+
     const mutationVariables = headers
       .map((header) => `${header}: $${header}`)
       .join(" ");
-
+      
     const mutation = gql`
         mutation Create(${mutationFields}) {
           createUserProspect(${mutationVariables}) {
@@ -102,30 +92,47 @@ async function importScript() {
         }
       `;
 
-    await pipeline(
-      fs.createReadStream(csvFilePath),
-      specialExcelParsing,
-      parse(csvOptions),
-      async function* (source) {
-        for await (const row of source as any) {
-          const variables = headers.reduce((acc: any, header: string) => {
-            if (row[header] === "true" || row[header] === "false") {
-              acc[header] = row[header] === "true";
-            } else {
-              acc[header] = row[header];
-            }
-            return acc;
-          }, {});
-
-          const { data: updateUserProspectData } = await client.mutate({
-            mutation,
-            variables,
-          });
-
-          console.log("User prospect created:", updateUserProspectData);
+    const processRow = (headers: string[]) => (row: any) => {
+      return headers.reduce((acc: any, header: string) => {
+        if (row[header] === undefined) {
+          console.log(`Warning: ${header} is undefined`);
+          acc[header] = null; // or some default value
+        } else if (row[header] === "true" || row[header] === "false") {
+          acc[header] = row[header] === "true";
+        } else {
+          acc[header] = row[header];
         }
-      },
-    );
+        return acc;
+      }, {});
+    };
+
+    const createUserProspect = async (client: any, mutation: any, variables: any) => {
+      try {
+        const { data: updateUserProspectData } = await client.mutate({
+          mutation,
+          variables,
+        });
+        console.log("User prospect created:", updateUserProspectData);
+        return updateUserProspectData;
+      } catch (error) {
+        console.error("Error creating user prospect:", error);
+        throw error;
+      }
+    };
+
+    for (const row of rows) {
+      const variables = processRow(headers)(row);
+      try {
+        await createUserProspect(client, mutation, variables);
+ 
+        // Decide whether to continue with the next row or stop the process
+        // If you want to stop on first error, you can add a `break;` here
+      } catch (error) {
+        console.error("Error creating user prospect:", error);
+        throw error;
+      }
+    }
+
     console.log("Import completed.");
   } catch (error) {
     console.error("Error while importing the CSV file:", error);
@@ -140,12 +147,13 @@ function decideHeader(sampleRow: any, header: string) {
   const value = sampleRow[header];
   if (value === "true" || value === "false") {
     return `$${header}: Boolean`;
-  } else if (typeof value === "string") {
+  } else if (typeof value === "string" || value === null || value === undefined) {
     return `$${header}: String`;
   } else if (typeof value === "number") {
     return `$${header}: Float`;
   } else {
-    throw new Error(`Unsupported data type for header: ${header}`);
+    console.warn(`Unsupported data type for header: ${header}. Defaulting to String.`);
+    return `$${header}: String`;
   }
 }
 

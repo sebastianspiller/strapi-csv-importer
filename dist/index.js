@@ -40,6 +40,7 @@ const apolloClient_1 = __importDefault(require("./apolloClient"));
 const specialExcelParsing_1 = __importDefault(require("./specialExcelParsing"));
 const dotenv_1 = __importDefault(require("dotenv"));
 const csv_parse_1 = require("csv-parse");
+console.log("Hello World");
 function importScript() {
     return __awaiter(this, void 0, void 0, function* () {
         console.log("Importing CSV file...");

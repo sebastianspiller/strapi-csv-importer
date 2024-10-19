@@ -22,13 +22,14 @@ async function importScript() {
   );
 
   const csvOptions = {
-    //columns: true,
+    // columns: true,
     delimiter: process.env.CSV_DELIMITER,
     quote: process.env.CSV_QUOTE || "",
     escape: process.env.CSV_ESCAPE,
     skipLines: 0,
     headers: true,
     strict: true,
+    ignoreEmpty: true,
   };
 
   // ".." because of the dist folder
@@ -46,86 +47,88 @@ async function importScript() {
   }
 
   const csvFilePath = path.join(csvDir, csvFiles[0]);
+  let headers: string[] = [];
+  let rows = [];
 
   try {
-    const headers = await new Promise<string[]>((resolve, reject) => {
-      const headerStream = fs
-        .createReadStream(csvFilePath)
-        .pipe(specialExcelParsing)
-        .pipe(parse({ ...csvOptions, to_line: 1 }));
-
-      headerStream.on("data", (header: string[]) => {
-        headerStream.pause();
-        resolve(header);
-      });
-      headerStream.on("error", (err: Error) => {
-        headerStream.pause();
-        reject(err);
-      });
-    });
-
-    console.log("headers", headers);
-
-    const sampleRow = await new Promise<string[]>((resolve, reject) => {
+    rows = await new Promise<string[][]>((resolve, reject) => {
       const rowStream = fs
         .createReadStream(csvFilePath)
         .pipe(specialExcelParsing)
-        .pipe(parse({ ...csvOptions, to_line: 2, from_line: 2 }));
+        .pipe(parse(csvOptions));
 
+      const allRows: string[][] = [];
+      let isFirstRow = true;
       rowStream.on("data", (row: string[]) => {
-        rowStream.pause();
-        resolve(row);
+        if (isFirstRow) {
+          headers = row;
+          isFirstRow = false;
+          return;
+        }
+        allRows.push(row);
+      });
+
+      rowStream.on("end", () => {
+        resolve(allRows);
       });
 
       rowStream.on("error", (err: Error) => {
-        rowStream.pause();
         reject(err);
       });
     });
 
-    console.log("sampleRow", sampleRow);
+    const collectionName = process.env.COLLECTION_NAME;
 
-    const mutationFields = headers
-      .map(decideHeader.bind(null, sampleRow))
-      .join(" ");
-    const mutationVariables = headers
-      .map((header) => `${header}: $${header}`)
-      .join(" ");
-
-    const mutation = gql`
-        mutation Create(${mutationFields}) {
-          createUserProspect(${mutationVariables}) {
-            data {
-              id
+    /**
+     * Create a json v2 format
+       {
+            "version": 2, // required for the import to work properly.
+            "data": {
+                // Each collection has a dedicated key in the `data` property.
+                "api::collection-name.collection-name": {
+                // Sub keys are `id`s of imported entries and values hold the data of the entries to import.
+                "1": {
+                    "id": 1
+                    "name": "Gly Clean"
+                "2": {
+                    "id": 2
+                    //...
+                }
             }
-          }
         }
-      `;
-
-    await pipeline(
-      fs.createReadStream(csvFilePath),
-      specialExcelParsing,
-      parse(csvOptions),
-      async function* (source) {
-        for await (const row of source as any) {
-          const variables = headers.reduce((acc: any, header: string) => {
-            if (row[header] === "true" || row[header] === "false") {
-              acc[header] = row[header] === "true";
-            } else {
-              acc[header] = row[header];
-            }
-            return acc;
-          }, {});
-
-          const { data: updateUserProspectData } = await client.mutate({
-            mutation,
-            variables,
-          });
-
-          console.log("User prospect created:", updateUserProspectData);
-        }
+     */
+    const jsonData: any = {
+      version: 2,
+      data: {
+        [`api::${collectionName}.${collectionName}`]: {},
       },
-    );
+    };
+
+    rows.forEach((row, index) => {
+      const rowData: any = {};
+      headers.forEach((header, headerIndex) => {
+        const snake_case_header = camelToSnake(header);
+        rowData[snake_case_header] = changeIfRichtext(
+          header,
+          row[headerIndex].trim(),
+        );
+      });
+      jsonData.data[`api::${collectionName}.${collectionName}`][index + 1] = {
+        id: index + 1,
+        ...rowData,
+        publishedAt: new Date().toISOString(),
+      };
+    });
+
+    // Save the json data in a json file in out directory:
+    const outputDir = path.join(__dirname, "..", "out");
+    if (!fs.existsSync(outputDir)) {
+      fs.mkdirSync(outputDir);
+    }
+
+    const outputFilePath = path.join(outputDir, "importData.json");
+    fs.writeFileSync(outputFilePath, JSON.stringify(jsonData, null, 2));
+
     console.log("Import completed.");
   } catch (error) {
     console.error("Error while importing the CSV file:", error);
@@ -147,6 +150,29 @@ function decideHeader(sampleRow: any, header: string) {
   } else {
     throw new Error(`Unsupported data type for header: ${header}`);
   }
+}
+
+/**
+ * Function: Switch CamelCase to snake_case
+ */
+function camelToSnake(str: string) {
+  return str.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
+}
+
+function changeIfRichtext(header: string, value: string) {
+  // get header from process.env.RICH_TEXT_FIELDS (comma separated):
+  const richTextFields = process.env.RICH_TEXT_FIELDS?.split(",") ?? [];
+
+  if (richTextFields.includes(header)) {
+    return [
+      {
+        type: "paragraph",
+        children: [{ type: "text", text: value }],
+      },
+    ];
+  }
+
+  return value;
 }
 
 importScript().catch((err) => console.error(err));

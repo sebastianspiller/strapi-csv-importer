@@ -8,34 +8,12 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
         step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
 };
-var __asyncValues = (this && this.__asyncValues) || function (o) {
-    if (!Symbol.asyncIterator) throw new TypeError("Symbol.asyncIterator is not defined.");
-    var m = o[Symbol.asyncIterator], i;
-    return m ? m.call(o) : (o = typeof __values === "function" ? __values(o) : o[Symbol.iterator](), i = {}, verb("next"), verb("throw"), verb("return"), i[Symbol.asyncIterator] = function () { return this; }, i);
-    function verb(n) { i[n] = o[n] && function (v) { return new Promise(function (resolve, reject) { v = o[n](v), settle(resolve, reject, v.done, v.value); }); }; }
-    function settle(resolve, reject, d, v) { Promise.resolve(v).then(function(v) { resolve({ value: v, done: d }); }, reject); }
-};
-var __await = (this && this.__await) || function (v) { return this instanceof __await ? (this.v = v, this) : new __await(v); }
-var __asyncGenerator = (this && this.__asyncGenerator) || function (thisArg, _arguments, generator) {
-    if (!Symbol.asyncIterator) throw new TypeError("Symbol.asyncIterator is not defined.");
-    var g = generator.apply(thisArg, _arguments || []), i, q = [];
-    return i = Object.create((typeof AsyncIterator === "function" ? AsyncIterator : Object).prototype), verb("next"), verb("throw"), verb("return", awaitReturn), i[Symbol.asyncIterator] = function () { return this; }, i;
-    function awaitReturn(f) { return function (v) { return Promise.resolve(v).then(f, reject); }; }
-    function verb(n, f) { if (g[n]) { i[n] = function (v) { return new Promise(function (a, b) { q.push([n, v, a, b]) > 1 || resume(n, v); }); }; if (f) i[n] = f(i[n]); } }
-    function resume(n, v) { try { step(g[n](v)); } catch (e) { settle(q[0][3], e); } }
-    function step(r) { r.value instanceof __await ? Promise.resolve(r.value.v).then(fulfill, reject) : settle(q[0][2], r); }
-    function fulfill(value) { resume("next", value); }
-    function reject(value) { resume("throw", value); }
-    function settle(f, v) { if (f(v), q.shift(), q.length) resume(q[0][0], q[0][1]); }
-};
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
-const promises_1 = require("stream/promises");
-const client_1 = require("@apollo/client");
 const apolloClient_1 = __importDefault(require("./apolloClient"));
 const specialExcelParsing_1 = __importDefault(require("./specialExcelParsing"));
 const dotenv_1 = __importDefault(require("dotenv"));
@@ -49,13 +27,14 @@ function importScript() {
         }
         const client = yield (0, apolloClient_1.default)(process.env.STRAPI_EMAIL, process.env.STRAPI_PASSWORD);
         const csvOptions = {
-            //columns: true,
+            // columns: true,
             delimiter: process.env.CSV_DELIMITER,
             quote: process.env.CSV_QUOTE || "",
             escape: process.env.CSV_ESCAPE,
             skipLines: 0,
             headers: true,
             strict: true,
+            ignoreEmpty: true,
         };
         // ".." because of the dist folder
         const csvDir = path_1.default.join(__dirname, "..", "csv");
@@ -69,85 +48,71 @@ function importScript() {
             throw new Error("Found more than 1 CSV file in the directory.");
         }
         const csvFilePath = path_1.default.join(csvDir, csvFiles[0]);
+        let headers = [];
+        let rows = [];
         try {
-            const headers = yield new Promise((resolve, reject) => {
-                const headerStream = fs_1.default
-                    .createReadStream(csvFilePath)
-                    .pipe(specialExcelParsing_1.default)
-                    .pipe((0, csv_parse_1.parse)(Object.assign(Object.assign({}, csvOptions), { to_line: 1 })));
-                headerStream.on("data", (header) => {
-                    headerStream.pause();
-                    resolve(header);
-                });
-                headerStream.on("error", (err) => {
-                    headerStream.pause();
-                    reject(err);
-                });
-            });
-            console.log("headers", headers);
-            const sampleRow = yield new Promise((resolve, reject) => {
+            rows = yield new Promise((resolve, reject) => {
                 const rowStream = fs_1.default
                     .createReadStream(csvFilePath)
                     .pipe(specialExcelParsing_1.default)
-                    .pipe((0, csv_parse_1.parse)(Object.assign(Object.assign({}, csvOptions), { to_line: 2, from_line: 2 })));
+                    .pipe((0, csv_parse_1.parse)(csvOptions));
+                const allRows = [];
+                let isFirstRow = true;
                 rowStream.on("data", (row) => {
-                    rowStream.pause();
-                    resolve(row);
+                    if (isFirstRow) {
+                        headers = row;
+                        isFirstRow = false;
+                        return;
+                    }
+                    allRows.push(row);
+                });
+                rowStream.on("end", () => {
+                    resolve(allRows);
                 });
                 rowStream.on("error", (err) => {
-                    rowStream.pause();
                     reject(err);
                 });
             });
-            console.log("sampleRow", sampleRow);
-            const mutationFields = headers
-                .map(decideHeader.bind(null, sampleRow))
-                .join(" ");
-            const mutationVariables = headers
-                .map((header) => `${header}: $${header}`)
-                .join(" ");
-            const mutation = (0, client_1.gql) `
-        mutation Create(${mutationFields}) {
-          createUserProspect(${mutationVariables}) {
-            data {
-              id
-            }
-          }
-        }
-      `;
-            yield (0, promises_1.pipeline)(fs_1.default.createReadStream(csvFilePath), specialExcelParsing_1.default, (0, csv_parse_1.parse)(csvOptions), function (source) {
-                return __asyncGenerator(this, arguments, function* () {
-                    var _a, e_1, _b, _c;
-                    try {
-                        for (var _d = true, _e = __asyncValues(source), _f; _f = yield __await(_e.next()), _a = _f.done, !_a; _d = true) {
-                            _c = _f.value;
-                            _d = false;
-                            const row = _c;
-                            const variables = headers.reduce((acc, header) => {
-                                if (row[header] === "true" || row[header] === "false") {
-                                    acc[header] = row[header] === "true";
-                                }
-                                else {
-                                    acc[header] = row[header];
-                                }
-                                return acc;
-                            }, {});
-                            const { data: updateUserProspectData } = yield __await(client.mutate({
-                                mutation,
-                                variables,
-                            }));
-                            console.log("User prospect created:", updateUserProspectData);
+            const collectionName = process.env.COLLECTION_NAME;
+            /**
+             * Create a json v2 format
+               {
+                    "version": 2, // required for the import to work properly.
+                    "data": {
+                        // Each collection has a dedicated key in the `data` property.
+                        "api::collection-name.collection-name": {
+                        // Sub keys are `id`s of imported entries and values hold the data of the entries to import.
+                        "1": {
+                            "id": 1
+                            "name": "Gly Clean"
+                        "2": {
+                            "id": 2
+                            //...
                         }
                     }
-                    catch (e_1_1) { e_1 = { error: e_1_1 }; }
-                    finally {
-                        try {
-                            if (!_d && !_a && (_b = _e.return)) yield __await(_b.call(_e));
-                        }
-                        finally { if (e_1) throw e_1.error; }
-                    }
+                }
+             */
+            const jsonData = {
+                version: 2,
+                data: {
+                    [`api::${collectionName}.${collectionName}`]: {},
+                },
+            };
+            rows.forEach((row, index) => {
+                const rowData = {};
+                headers.forEach((header, headerIndex) => {
+                    const snake_case_header = camelToSnake(header);
+                    rowData[snake_case_header] = changeIfRichtext(header, row[headerIndex].trim());
                 });
+                jsonData.data[`api::${collectionName}.${collectionName}`][index + 1] = Object.assign(Object.assign({ id: index + 1 }, rowData), { publishedAt: new Date().toISOString() });
             });
+            // Save the json data in a json file in out directory:
+            const outputDir = path_1.default.join(__dirname, "..", "out");
+            if (!fs_1.default.existsSync(outputDir)) {
+                fs_1.default.mkdirSync(outputDir);
+            }
+            const outputFilePath = path_1.default.join(outputDir, "importData.json");
+            fs_1.default.writeFileSync(outputFilePath, JSON.stringify(jsonData, null, 2));
             console.log("Import completed.");
         }
         catch (error) {
@@ -173,5 +138,25 @@ function decideHeader(sampleRow, header) {
     else {
         throw new Error(`Unsupported data type for header: ${header}`);
     }
+}
+/**
+ * Function: Switch CamelCase to snake_case
+ */
+function camelToSnake(str) {
+    return str.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
+}
+function changeIfRichtext(header, value) {
+    var _a, _b;
+    // get header from process.env.RICH_TEXT_FIELDS (comma separated):
+    const richTextFields = (_b = (_a = process.env.RICH_TEXT_FIELDS) === null || _a === void 0 ? void 0 : _a.split(",")) !== null && _b !== void 0 ? _b : [];
+    if (richTextFields.includes(header)) {
+        return [
+            {
+                type: "paragraph",
+                children: [{ type: "text", text: value }],
+            },
+        ];
+    }
+    return value;
 }
 importScript().catch((err) => console.error(err));
